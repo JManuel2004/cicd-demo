@@ -21,6 +21,7 @@ CICD Demo uses some kubernetes primitives to deploy:
 * Deployment
 * Services
 * Ingress ( with TLS )
+* HorizontalPodAutoscaler
 
 ```bash
      internet
@@ -30,7 +31,8 @@ CICD Demo uses some kubernetes primitives to deploy:
    [ Services ]
    --|-----|--
    [   Pods   ]
-
+   
+   (Auto-scaling via HPA)
 ```
 
 This project includes:
@@ -39,7 +41,108 @@ This project includes:
 * Jenkinsfile integration to run pipelines
 * Dockerfile containing the base image to run java apps
 * Makefile and docker-compose to make the pipeline steps much simpler
-* Kubernetes deployment file demonstrating how to deploy this app in a simple Kubernetes cluster
+* **Helm Chart** for Kubernetes deployment (NEW!)
+  - Development environment (1 replica, minimal resources)
+  - Production environment (3+ replicas, autoscaling, security policies)
+
+## 🚀 Kubernetes + Helm Deployment
+
+### Prerrequisitos para Kubernetes
+
+#### Opción A: Docker Desktop (Windows/Mac)
+```bash
+# Instalar Docker Desktop
+# Settings → Kubernetes → Enable Kubernetes
+```
+
+#### Opción B: Minikube
+```bash
+# Instalar Minikube
+choco install minikube  # Windows
+
+# Iniciar cluster
+minikube start
+```
+
+### Instalar Helm
+```bash
+# Windows
+choco install kubernetes-helm
+
+# O descargar desde
+https://helm.sh/docs/intro/install/
+```
+
+### Estructu​ra Helm Chart
+
+```
+helm/cicd-demo/
+├── Chart.yaml              # Metadatos del chart
+├── values.yaml             # Valores por defecto
+├── values-dev.yaml         # Overrides desarrollo
+├── values-prod.yaml        # Overrides producción
+└── templates/
+    ├── deployment.yaml     # Deployment de Kubernetes
+    ├── service.yaml        # Service para exposición
+    ├── ingress.yaml        # Ingress para ruteo HTTP
+    ├── hpa.yaml            # HorizontalPodAutoscaler
+    ├── serviceaccount.yaml  # ServiceAccount
+    └── _helpers.tpl        # Funciones reutilizables
+```
+
+### Desplegar Manualmente con Helm
+
+#### Desarrollo
+```bash
+helm upgrade --install cicd-demo-dev ./helm/cicd-demo \
+  --namespace development \
+  --create-namespace \
+  --values helm/cicd-demo/values-dev.yaml \
+  --set image.tag=master-latest
+```
+
+#### Producción
+```bash
+helm upgrade --install cicd-demo-prod ./helm/cicd-demo \
+  --namespace production \
+  --create-namespace \
+  --values helm/cicd-demo/values-prod.yaml \
+  --set image.tag=1.0.0
+```
+
+### Verificar Deployment
+
+```bash
+# Ver releases
+helm list -n development
+helm list -n production
+
+# Ver status
+helm status cicd-demo-dev -n development
+
+# Ver historia
+helm history cicd-demo-dev -n development
+
+# Rollback (si es necesario)
+helm rollback cicd-demo-dev 1 -n development
+```
+
+### Monitorear Pods
+
+```bash
+# Ver pods en ejecución
+kubectl get pods -n development
+kubectl get pods -n production
+
+# Logs de un pod
+kubectl logs -f deployment/cicd-demo-dev -n development
+
+# Exec en un pod
+kubectl exec -it <pod-name> -n development -- /bin/bash
+
+# Ver eventos
+kubectl describe pod <pod-name> -n development
+```
 
 ## Pipeline Setup
 
@@ -63,9 +166,11 @@ Ir a **Jenkins > Manage Credentials** y crear:
 - `REGISTRY_USERNAME` - Usuario de Docker Registry
 - `POSTGRES_PASSWORD` - Contraseña PostgreSQL
 - `SONAR_TOKEN` - Token de SonarQube
-- `KUBE_API_SERVER` - URL del servidor Kubernetes
-- `KUBE_DEV_TOKEN` - Token Kubernetes para dev
-- `KUBE_QA_TOKEN` - Token Kubernetes para qa
+
+**Para Kubernetes con Helm:**
+- `KUBECONFIG` - Archivo kubeconfig de tu cluster Kubernetes
+  - O configurar `~/.kube/config` en el agente Jenkins
+- Jenkins debe tener `kubectl` y `helm` instalados
 
 ### Configurar SonarQube Localmente
 
@@ -115,7 +220,20 @@ Docker Build
    ↓
 Docker Push
    ↓
-Deploy (dev/qa según rama)
+Deploy To Kubernetes (Helm) ← NEW!
+   ├─ Development (master/main)
+   └─ Production (master/release-*)
+   ↓
+Health Check (Kubernetes liveness/readiness probes)
+```
+
+**Con Docker Local (alternativa):**
+```
+... (mismo hasta Docker Push)
+   ↓
+Deploy To Local (docker run -p 8080:8080)
+   ↓
+Health Check (http://localhost:8080/actuator/health)
 ```
 
 ## Puertas de Calidad (Gatekeeping) 

@@ -7,8 +7,6 @@ pipeline {
        REGISTRY_USERNAME = credentials('REGISTRY_USERNAME')
        POSTGRES_PASSWORD = credentials('POSTGRES_PASSWORD')
        APP_NAME = "cicd-demo"
-       GIT_SHA = sh(script: "git rev-parse --short HEAD", returnStdout: true).trim()
-       BUILD_VERSION = "${FEATURE_NAME}-${GIT_SHA}"
        REGISTRY_HOST = "github.com"
        IMAGE_NAME = "${REGISTRY_HOST}/helderklemp/${APP_NAME}"
     }
@@ -17,6 +15,10 @@ pipeline {
         stage('Checkout') {
             steps {
                 checkout scm
+                script {
+                    env.GIT_SHA = sh(script: "git rev-parse --short HEAD", returnStdout: true).trim()
+                    env.BUILD_VERSION = "${env.FEATURE_NAME}-${env.GIT_SHA}"
+                }
             }
         }
 
@@ -28,7 +30,7 @@ pipeline {
 
         stage('Docker Build') {
             when {
-                expression { BRANCH_NAME != 'main' && BRANCH_NAME != 'master' }
+                expression { BRANCH_NAME ==~ /(master|main)/ }
             }
             steps {
                 sh "make dockerLogin dockerBuild"
@@ -36,12 +38,15 @@ pipeline {
         }
 
         stage('Docker Scan') {
+            when {
+                expression { BRANCH_NAME ==~ /(master|main)/ }
+            }
             steps {
                 sh "make dockerScan"
             }
             post {
                 cleanup {
-                    sh "docker-compose down -v"
+                    sh "docker-compose down -v || true"
                 }
             }
         }
@@ -69,6 +74,9 @@ pipeline {
         }
 
         stage('Container Security Scan (Trivy)') {
+            when {
+                expression { BRANCH_NAME ==~ /(master|main)/ }
+            }
             steps {
                 script {
                     sh "docker build -t ${IMAGE_NAME}:${BUILD_VERSION} ."
@@ -80,7 +88,7 @@ pipeline {
                     )
                     
                     if (trivyResult != 0) {
-                        error(" Pipeline Fallido: Trivy detectó vulnerabilidades CRITICAL. Resuelve antes de continuar.")
+                        error("Pipeline Fallido: Trivy detectó vulnerabilidades CRITICAL. Resuelve antes de continuar.")
                     }
                     
                     // Reporte informativo de todas las severidades
@@ -96,6 +104,9 @@ pipeline {
         }
 
         stage('Push Docker Image') {
+            when {
+                expression { BRANCH_NAME ==~ /(master|main)/ }
+            }
             steps {
                 sh "make dockerPush"
             }
@@ -108,29 +119,28 @@ pipeline {
             }
         }
 
-        stage('Deploy To dev') {
+        stage('Deploy To Kubernetes (Helm)') {
             when { expression { BRANCH_NAME ==~ /(master|main)/ }}
-            environment { 
-                ENV = "dev"
-                APP_DNS = util.selectAppUrl(ENV, FEATURE_NAME, APP_NAME)
-                KUBE_SERVER = credentials("KUBE_API_SERVER")
-                KUBE_TOKEN = credentials("KUBE_DEV_TOKEN")
-            }
             steps {
-                sh "make kubeLogin deploy"
-            }
-        }
-        
-        stage('Deploy To qa') {
-            when { expression { BRANCH_NAME ==~ /(master|release-[0-9]+$)/ }} // Only Master and Release branches 
-            environment { 
-                ENV = "qa"
-                APP_DNS = util.selectAppUrl(ENV, FEATURE_NAME, APP_NAME)
-                KUBE_SERVER = credentials("KUBE_API_SERVER")
-                KUBE_TOKEN = credentials("KUBE_QA_TOKEN")
-            }
-            steps {
-                sh "make kubeLogin deploy"
+                script {
+                    echo "🚀 Desplegando en Kubernetes con Helm..."
+                    
+                    sh '''
+                        # Crear namespace si no existe
+                        kubectl create namespace production || true
+                        
+                        # Deploy con Helm
+                        helm upgrade --install cicd-demo ./helm/cicd-demo \
+                            --namespace production \
+                            --set image.repository=${IMAGE_NAME} \
+                            --set image.tag=${BUILD_VERSION} \
+                            --wait \
+                            --timeout 5m
+                        
+                        echo "✅ Deployment completado"
+                        kubectl get all -n production
+                    '''
+                }
             }
         }
 

@@ -10,7 +10,7 @@ import java.net.UnknownHostException;
 @RestController
 public class ApiController {
 
-    @RequestMapping("/")
+    @RequestMapping("/api/env")
     public EnvDetail home() throws UnknownHostException {
         EnvDetail env=new EnvDetail();
         InetAddress inetAddress = InetAddress.getLocalHost();

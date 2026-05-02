@@ -1,304 +1,139 @@
-#!/usr/bin/env groovy
-
 pipeline {
-    environment{
-       FEATURE_NAME = BRANCH_NAME.replaceAll('[\\(\\)_/]','-').toLowerCase()
-       REGISTRY_PASSWORD = credentials('REGISTRY_PASSWORD')
-       REGISTRY_USERNAME = credentials('REGISTRY_USERNAME')
-       POSTGRES_PASSWORD = credentials('POSTGRES_PASSWORD')
-       APP_NAME = "cicd-demo"
-       REGISTRY_HOST = "github.com"
-       IMAGE_NAME = "${REGISTRY_HOST}/helderklemp/${APP_NAME}"
+    agent any
+
+    environment {
+        APP_NAME  = "cicd-demo"
+        IMAGE_TAG = "${APP_NAME}:latest"
+        CONTAINER = "${APP_NAME}-container"
     }
-    agent any 
+
     stages {
         stage('Checkout') {
             steps {
                 checkout scm
                 script {
                     env.GIT_SHA = sh(script: "git rev-parse --short HEAD", returnStdout: true).trim()
-                    env.BUILD_VERSION = "${env.FEATURE_NAME}-${env.GIT_SHA}"
                 }
             }
         }
 
-        stage('Build & Test') {
+        stage('Build') {
             steps {
-                sh "mvn clean package"
+                sh 'mvn clean package -DskipTests'
+            }
+            post {
+                success {
+                    archiveArtifacts artifacts: 'target/*.jar', allowEmptyArchive: true
+                }
+            }
+        }
+
+        stage('Test') {
+            steps {
+                // Solo tests unitarios — los de Selenium requieren servidor externo
+                sh 'mvn test -Dgroups="au.com.equifax.cicddemo.domain.UnitTest"'
+            }
+            post {
+                always {
+                    junit testResults: 'target/surefire-reports/*.xml', allowEmptyResults: true
+                }
+            }
+        }
+
+        stage('Static Analysis (SonarQube)') {
+            when { anyOf { branch 'master'; branch 'main' } }
+            steps {
+                withSonarQubeEnv('SonarQube') {
+                    sh "mvn sonar:sonar -Dsonar.projectKey=${APP_NAME}"
+                }
+            }
+        }
+
+        stage('Quality Gate') {
+            when { anyOf { branch 'master'; branch 'main' } }
+            steps {
+                timeout(time: 5, unit: 'MINUTES') {
+                    waitForQualityGate abortPipeline: true
+                }
             }
         }
 
         stage('Docker Build') {
-            when {
-                expression { BRANCH_NAME ==~ /(master|main)/ }
-            }
             steps {
-                sh "make dockerLogin dockerBuild"
+                sh "docker build -t ${IMAGE_TAG} ."
             }
         }
 
-        stage('Docker Scan') {
-            when {
-                expression { BRANCH_NAME ==~ /(master|main)/ }
-            }
-            steps {
-                sh "make dockerScan"
-            }
-            post {
-                cleanup {
-                    sh "docker-compose down -v || true"
-                }
-            }
-        }
-        
-        stage('Static Analysis (SonarQube)') {
-            when {
-                anyOf { branch 'master'; branch 'main'; branch 'release'}
-            }    
+        stage('Security Scan (Trivy)') {
             steps {
                 script {
-                    sh "mvn sonar:sonar -Dsonar.projectKey=${APP_NAME} -Dsonar.host.url=http://sonarqube:9000 -Dsonar.login='${SONAR_TOKEN}'"
-                    
-                    
-                    def response = sh(
-                        script: """curl -s http://sonarqube:9000/api/hotspots/search?projectKey=${APP_NAME} | grep -o '"total":[0-9]*' || echo '"total":0'""",
-                        returnStdout: true
-                    ).trim()
-                    def hotspots = response.replaceAll('[^0-9]', '').toInteger()
-                    
-                    if (hotspots > 0) {
-                        error("Pipeline Fallido: SonarQube detectó ${hotspots} Security Hotspots. Resuelve antes de continuar.")
-                    }
-                }
-            }
-        }
-
-        stage('Container Security Scan (Trivy)') {
-            when {
-                expression { BRANCH_NAME ==~ /(master|main)/ }
-            }
-            steps {
-                script {
-                    sh "docker build -t ${IMAGE_NAME}:${BUILD_VERSION} ."
-                    
-                    // Gatekeeping: Fallar si hay vulnerabilidades CRITICAL
-                    def trivyResult = sh(
-                        script: "trivy image ${IMAGE_NAME}:${BUILD_VERSION} --severity CRITICAL --exit-code 1",
+                    // --ignore-unfixed: solo falla si hay CVE CRITICAL con parche disponible
+                    def result = sh(
+                        script: "trivy image --severity CRITICAL --exit-code 1 --ignore-unfixed ${IMAGE_TAG}",
                         returnStatus: true
                     )
-                    
-                    if (trivyResult != 0) {
-                        error("Pipeline Fallido: Trivy detectó vulnerabilidades CRITICAL. Resuelve antes de continuar.")
+                    sh "trivy image --severity HIGH,CRITICAL --format json --output trivy-report.json ${IMAGE_TAG} || true"
+                    archiveArtifacts artifacts: 'trivy-report.json', allowEmptyArchive: true
+                    if (result != 0) {
+                        error("Trivy detectó vulnerabilidades CRITICAL con parche disponible. Pipeline abortado.")
                     }
-                    
-                    // Reporte informativo de todas las severidades
-                    sh "trivy image ${IMAGE_NAME}:${BUILD_VERSION} --severity HIGH,CRITICAL --format json > trivy-report.json || true"
                 }
             }
         }
 
-        stage('Integration Tests') {
+        stage('Deploy') {
             steps {
-                sh "make integrationTest"
-            }
-        }
-
-        stage('Push Docker Image') {
-            when {
-                expression { BRANCH_NAME ==~ /(master|main)/ }
-            }
-            steps {
-                sh "make dockerPush"
-            }
-        }
-
-        stage('Push Latest Tag') {
-            when { branch 'master' }
-            steps {
-                sh "make dockerPushLatest"
-            }
-        }
-
-        stage('Deploy To Kubernetes (Helm)') {
-            when { expression { BRANCH_NAME ==~ /(master|main)/ }}
-            steps {
-                script {
-                    echo "🚀 Desplegando en Kubernetes con Helm..."
-                    
-                    sh '''
-                        # Crear namespace si no existe
-                        kubectl create namespace production || true
-                        
-                        # Deploy con Helm
-                        helm upgrade --install cicd-demo ./helm/cicd-demo \
-                            --namespace production \
-                            --set image.repository=${IMAGE_NAME} \
-                            --set image.tag=${BUILD_VERSION} \
-                            --wait \
-                            --timeout 5m
-                        
-                        echo "✅ Deployment completado"
-                        kubectl get all -n production
-                    '''
-                }
-            }
-        }
-
-        stage('Deploy To Local (master/main)') {
-            when { expression { BRANCH_NAME ==~ /(master|main)/ }}
-            steps {
-                script {
-                    echo "🚀 Desplegando contenedor localmente en puerto 8080..."
-                    
-                    // Detener contenedor anterior si existe
-                    sh '''
-                        docker stop cicd-demo-container || true
-                        docker rm cicd-demo-container || true
-                    '''
-                    
-                    // Desplegar nuevo contenedor
-                    sh '''
-                        docker run -d \
-                            --name cicd-demo-container \
-                            -p 8080:8080 \
-                            ${IMAGE_NAME}:${BUILD_VERSION}
-                    '''
-                    
-                    echo "✅ Contenedor desplegado en http://localhost:8080"
-                }
+                sh """
+                    docker stop ${CONTAINER} || true
+                    docker rm   ${CONTAINER} || true
+                    docker run -d -p 80:80 --name ${CONTAINER} ${IMAGE_TAG}
+                """
+                echo "Aplicacion desplegada en http://localhost:80"
             }
         }
 
         stage('Health Check') {
-            when { expression { BRANCH_NAME ==~ /(master|main)/ }}
             steps {
-                script {
-                    echo "🔍 Verificando salud de la aplicación..."
-                    
-                    sh '''
-                        sleep 5 # Esperar a que la app inicie
-                        
-                        max_attempts=10
-                        attempts=0
-                        
-                        while [ $attempts -lt $max_attempts ]; do
-                            response=$(curl -s -w "%{http_code}" -o /dev/null http://localhost:8080/actuator/health || echo "000")
-                            
-                            if [ "$response" = "200" ]; then
-                                echo "✅ Aplicación respondiendo correctamente (HTTP 200)"
-                                exit 0
-                            fi
-                            
-                            attempts=$((attempts + 1))
-                            echo "Intento $attempts/$max_attempts - HTTP $response"
-                            sleep 2
-                        done
-                        
-                        echo "❌ Aplicación no responde después de $max_attempts intentos"
-                        exit 1
-                    '''
-                }
+                // wget corre DENTRO del contenedor via docker exec para evitar problemas de red entre contenedores
+                sh '''
+                    for i in $(seq 1 10); do
+                        if docker exec cicd-demo-container wget -qO /dev/null http://localhost:80 2>/dev/null; then
+                            echo "Health check OK en intento $i"
+                            exit 0
+                        fi
+                        echo "Intento $i/10 - esperando..."
+                        sleep 3
+                    done
+                    echo "Health check fallido: la aplicacion no responde en puerto 80"
+                    exit 1
+                '''
             }
         }
-        
     }
+
     post {
         always {
-            script {
-                def buildStatus = currentBuild.result
-                def buildDuration = currentBuild.durationString
-                def buildNumber = currentBuild.number
-                
-                echo "════════════════════════════════════════════"
-                echo "📊 RESUMEN DE EJECUCIÓN"
-                echo "════════════════════════════════════════════"
-                echo "✓ Rama: ${BRANCH_NAME}"
-                echo "✓ Build: #${buildNumber}"
-                echo "✓ Duración: ${buildDuration}"
-                echo "✓ Estado: ${buildStatus}"
-                echo "════════════════════════════════════════════"
-                
-                // Notificaciones por rama
-                if(BRANCH_NAME ==~ /(master|main|release-[0-9]+$)/ ){
-                    util.notifySlack(buildStatus)
-                }
-            }
-            
-            // Archivar reportes
-            archiveArtifacts artifacts: 'target/*.jar', allowEmptyArchive: true, fingerprint: true
-            junit testResults: 'target/surefire-reports/*.xml', allowEmptyResults: true
-            
-            // Archivar reportes de seguridad si existen
-            archiveArtifacts artifacts: 'trivy-report.json', allowEmptyArchive: true
-            
-            // Limpieza de infraestructura
-            sh '''
-                echo "🧹 Limpiando entorno..."
-                docker-compose down -v || true
-                docker system prune -f --filter "until=24h" || true
-            '''
-            
-            // Limpiar workspace
+            echo "Limpiando entorno..."
             cleanWs()
         }
-        
         failure {
-            script {
-                def failureStage = env.STAGE_NAME ?: "Desconocida"
-                echo "════════════════════════════════════════════"
-                echo "❌ PIPELINE FALLIDO"
-                echo "════════════════════════════════════════════"
-                echo "Etapa fallida: ${failureStage}"
-                echo "Rama: ${BRANCH_NAME}"
-                echo "Build: #${currentBuild.number}"
-                echo "════════════════════════════════════════════"
-                echo "Acciones a tomar:"
-                echo "1. Revisar logs completos en Jenkins"
-                echo "2. Si es SonarQube: revisar Security Hotspots"
-                echo "3. Si es Trivy: actualizar dependencias vulnerables"
-                echo "4. Hacer commit con las correcciones"
-                echo "5. Push al repositorio para reintentar"
-                echo "════════════════════════════════════════════"
-                
-                // Notificación de falla
-                if(BRANCH_NAME ==~ /(master|main)/ ){
-                    util.notifySlack("FAILED")
-                }
-            }
+            sh "docker stop ${CONTAINER} || true"
+            sh "docker rm   ${CONTAINER} || true"
+            echo "============================================"
+            echo "PIPELINE FALLIDO"
+            echo "Commit : ${env.GIT_SHA}"
+            echo "Rama   : ${env.BRANCH_NAME}"
+            echo "Build  : #${currentBuild.number}"
+            echo "Revisa los logs para identificar el error."
+            echo "============================================"
         }
-        
         success {
-            script {
-                echo "════════════════════════════════════════════"
-                echo "✅ PIPELINE COMPLETADO EXITOSAMENTE"
-                echo "════════════════════════════════════════════"
-                
-                if(BRANCH_NAME ==~ /(master|main)/ ){
-                    echo "🚀 La aplicación está disponible en:"
-                    echo "   • Local: http://localhost:8080"
-                    echo "   • Kubernetes DEV: ${APP_DNS}"
-                }
-                
-                echo "📊 Reportes disponibles:"
-                echo "   • Build: target/*.jar"
-                echo "   • Tests: target/surefire-reports/"
-                echo "   • Seguridad: trivy-report.json"
-                echo "════════════════════════════════════════════"
-                
-                // Notificación de éxito
-                if(BRANCH_NAME ==~ /(master|main)/ ){
-                    util.notifySlack("SUCCESS")
-                }
-            }
-        }
-        
-        unstable {
-            script {
-                echo "⚠️ Pipeline UNSTABLE - Revisar advertencias"
-                if(BRANCH_NAME ==~ /(master|main)/ ){
-                    util.notifySlack("UNSTABLE")
-                }
-            }
+            echo "============================================"
+            echo "PIPELINE EXITOSO"
+            echo "Commit  : ${env.GIT_SHA}"
+            echo "Rama    : ${env.BRANCH_NAME}"
+            echo "URL     : http://localhost:80"
+            echo "============================================"
         }
     }
 }

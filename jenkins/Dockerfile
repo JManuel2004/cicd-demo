@@ -1,28 +1,27 @@
 FROM jenkins/jenkins:lts
 
-# if we want to install via apt
 USER root
-# kubectl
-RUN apt-get update && apt-get install -y apt-transport-https && \
-    curl -s https://packages.cloud.google.com/apt/doc/apt-key.gpg | apt-key add - && \
-    touch /etc/apt/sources.list.d/kubernetes.list && \
-    echo "deb http://apt.kubernetes.io/ kubernetes-xenial main" | tee -a /etc/apt/sources.list.d/kubernetes.list && \
-    apt-get update && apt-get install -y kubectl
-# Docker
-RUN apt-get -y install ca-certificates \
-     curl \
-     vim \
-     gnupg2 \
-     software-properties-common && \
-    curl -fsSL https://download.docker.com/linux/$(. /etc/os-release; echo "$ID")/gpg > /tmp/dkey; apt-key add /tmp/dkey && \
-    add-apt-repository \
-    "deb [arch=amd64] https://download.docker.com/linux/$(. /etc/os-release; echo "$ID") \
-    $(lsb_release -cs) \
-    stable" && \
+
+# Docker CLI
+RUN apt-get update && \
+    apt-get install -y ca-certificates curl gnupg2 lsb-release && \
+    install -m 0755 -d /etc/apt/keyrings && \
+    curl -fsSL https://download.docker.com/linux/debian/gpg -o /etc/apt/keyrings/docker.asc && \
+    chmod a+r /etc/apt/keyrings/docker.asc && \
+    echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/debian $(lsb_release -cs) stable" \
+        > /etc/apt/sources.list.d/docker.list && \
     apt-get update && \
-    apt-get -y install docker-ce    
-ARG MINIKUBE_DIR
-COPY kubectl-config.yml /root/.kube/config
-COPY ca.crt /root/.kube/ca.crt 
-COPY client.crt /root/.kube/client.crt 
-COPY client.key /root/.kube/client.key
+    apt-get install -y docker-ce-cli
+
+# Maven
+RUN apt-get install -y maven
+
+# Trivy
+RUN curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh | \
+    sh -s -- -b /usr/local/bin
+
+# Permisos para usar el socket de Docker
+# El GID real del socket se inyecta al correr el contenedor con --group-add
+RUN groupadd -f docker && usermod -aG docker jenkins && chmod 777 /var/run || true
+
+USER jenkins

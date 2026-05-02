@@ -31,7 +31,7 @@ pipeline {
         stage('Test') {
             steps {
                 // Solo tests unitarios — los de Selenium requieren servidor externo
-                sh 'mvn test -Dgroups="au.com.equifax.cicddemo.domain.UnitTest"'
+                sh 'mvn test -Dgroups="au.com.equifax.cicddemo.domain.UnitTest" -DforkCount=0'
             }
             post {
                 always {

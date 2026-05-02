@@ -1,0 +1,4 @@
+# CVE-2016-1000027: spring-web HttpInvokerServiceExporter untrusted deserialization
+# Fixed only in Spring Framework 6.0.0, which requires migrating to Spring Boot 3.x (Java 17+)
+# This project uses Spring Boot 2.7.x (Java 11). Migration is out of scope for this exercise.
+CVE-2016-1000027

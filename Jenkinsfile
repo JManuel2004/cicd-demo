@@ -41,7 +41,6 @@ pipeline {
         }
 
         stage('Static Analysis (SonarQube)') {
-            when { anyOf { branch 'master'; branch 'main' } }
             steps {
                 withSonarQubeEnv('SonarQube') {
                     sh "mvn sonar:sonar -Dsonar.projectKey=${APP_NAME}"
@@ -50,7 +49,6 @@ pipeline {
         }
 
         stage('Quality Gate') {
-            when { anyOf { branch 'master'; branch 'main' } }
             steps {
                 timeout(time: 5, unit: 'MINUTES') {
                     waitForQualityGate abortPipeline: true
@@ -69,10 +67,10 @@ pipeline {
                 script {
                     // --ignore-unfixed: solo falla si hay CVE CRITICAL con parche disponible
                     def result = sh(
-                        script: "trivy image --severity CRITICAL --exit-code 1 --ignore-unfixed ${IMAGE_TAG}",
+                        script: "trivy image --severity CRITICAL --exit-code 1 --ignore-unfixed --timeout 10m ${IMAGE_TAG}",
                         returnStatus: true
                     )
-                    sh "trivy image --severity HIGH,CRITICAL --format json --output trivy-report.json ${IMAGE_TAG} || true"
+                    sh "trivy image --severity HIGH,CRITICAL --format json --output trivy-report.json --timeout 10m ${IMAGE_TAG} || true"
                     archiveArtifacts artifacts: 'trivy-report.json', allowEmptyArchive: true
                     if (result != 0) {
                         error("Trivy detectó vulnerabilidades CRITICAL con parche disponible. Pipeline abortado.")

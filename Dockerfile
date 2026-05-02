@@ -1,4 +1,4 @@
-FROM eclipse-temurin:17-jre-alpine
+FROM eclipse-temurin:21-jre-jammy
 VOLUME /tmp
 EXPOSE 80
 COPY target/cicd-demo-*.jar app.jar
